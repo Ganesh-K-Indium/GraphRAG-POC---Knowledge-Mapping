@@ -43,7 +43,8 @@ from core.models import (
     RelationshipType,
 )
 from graph.builder import GraphBuilder
-from graph.graphiti_memory import GraphitiMemory
+# GraphitiMemory is disabled — uncomment to re-enable:
+# from graph.graphiti_memory import GraphitiMemory
 from graph.neo4j_store import Neo4jGraphStore
 from vector.qdrant_store import QdrantVectorStore
 
@@ -88,14 +89,16 @@ class QAService:
 
     def __init__(
         self,
+        workspace_id: str,
         store: Neo4jGraphStore,
         builder: GraphBuilder,
-        graphiti: GraphitiMemory,
+        graphiti,  # GraphitiMemory | None
         vector_store: QdrantVectorStore,
     ) -> None:
+        self.workspace_id = workspace_id
         self.store = store
         self.builder = builder
-        self.graphiti = graphiti
+        self.graphiti = graphiti  # May be None when Graphiti is disabled
         self.vector_store = vector_store
         self._client: OpenAI = OpenAI(api_key=settings.openai_api_key)
 
@@ -170,7 +173,7 @@ class QAService:
 
     def _gather_coverage_gap_evidence(self) -> list[dict[str, Any]]:
         """Return evidence for requirements with no contract-clause coverage."""
-        coverage = self.builder.assess_coverage()
+        coverage = self.builder.assess_coverage(self.workspace_id)
         uncovered = [c for c in coverage if c.status == CoverageStatus.NOT_COVERED]
         return [
             {
@@ -184,12 +187,12 @@ class QAService:
 
     def _gather_risk_for_partial_evidence(self) -> list[dict[str, Any]]:
         """Return risks associated with partially-covered requirements."""
-        coverage = self.builder.assess_coverage()
+        coverage = self.builder.assess_coverage(self.workspace_id)
         partial = [c for c in coverage if c.status == CoverageStatus.PARTIAL]
         evidence: list[dict[str, Any]] = []
         for c in partial:
             for risk_id in c.risks:
-                risk = self.store.get_element(risk_id)
+                risk = self.store.get_element(risk_id, self.workspace_id)
                 if risk is not None:
                     evidence.append(
                         {
@@ -203,10 +206,10 @@ class QAService:
 
     def _gather_no_mitigation_evidence(self) -> list[dict[str, Any]]:
         """Return risks that have no outgoing MITIGATED_BY relationship."""
-        risks = self.store.get_elements_by_type(ElementType.RISK)
+        risks = self.store.get_elements_by_type(ElementType.RISK, self.workspace_id)
         evidence: list[dict[str, Any]] = []
         for risk in risks:
-            outgoing = self.store.get_outgoing_relationships(risk.id, None)
+            outgoing = self.store.get_outgoing_relationships(risk.id, self.workspace_id)
             has_mitigation = any(
                 r.type == RelationshipType.MITIGATED_BY for r in outgoing
             )
@@ -218,10 +221,10 @@ class QAService:
 
     def _gather_no_ld_evidence(self) -> list[dict[str, Any]]:
         """Return risks that have no outgoing LINKED_TO_LD relationship."""
-        risks = self.store.get_elements_by_type(ElementType.RISK)
+        risks = self.store.get_elements_by_type(ElementType.RISK, self.workspace_id)
         evidence: list[dict[str, Any]] = []
         for risk in risks:
-            outgoing = self.store.get_outgoing_relationships(risk.id, None)
+            outgoing = self.store.get_outgoing_relationships(risk.id, self.workspace_id)
             has_ld = any(r.type == RelationshipType.LINKED_TO_LD for r in outgoing)
             if not has_ld:
                 evidence.append(
@@ -255,20 +258,22 @@ class QAService:
         except Exception as exc:
             logger.warning("Vector search failed: %s", exc)
 
-        # Graphiti semantic entity search
-        try:
-            graphiti_results = self.graphiti.search_graph_sync(
-                question, num_results=3
-            )
-            for r in graphiti_results:
-                evidence.append(
-                    {
-                        "graphiti_fact": r.get("fact", ""),
-                        "uuid": r.get("uuid", ""),
-                    }
-                )
-        except Exception as exc:
-            logger.warning("Graphiti search failed: %s", exc)
+        # Graphiti semantic entity search is disabled (workspace isolation pending).
+        # Uncomment the block below to re-enable when Graphiti is configured.
+        # try:
+        #     if self.graphiti is not None:
+        #         graphiti_results = self.graphiti.search_graph_sync(
+        #             question, num_results=3
+        #         )
+        #         for r in graphiti_results:
+        #             evidence.append(
+        #                 {
+        #                     "graphiti_fact": r.get("fact", ""),
+        #                     "uuid": r.get("uuid", ""),
+        #                 }
+        #             )
+        # except Exception as exc:
+        #     logger.warning("Graphiti search failed: %s", exc)
 
         return evidence
 

@@ -24,13 +24,16 @@ from __future__ import annotations
 import hashlib
 import io
 import logging
+from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
 from parsers import ParserFactory
+from parsers.pdf_parser import PDFParser
 from extractors import LLMExtractor
 from core.models import (
     AtomicElement,
     ExtractionResult,
+    ImageContext,
     ParsedDocument,
     Relationship,
 )
@@ -69,6 +72,10 @@ class DocumentService:
         """
         Parse a single file and extract its typed atomic elements.
 
+        For PDF files, this also extracts and analyzes embedded images
+        using GPT-4o Vision, merging the resulting elements into the
+        main element list.
+
         Parameters
         ----------
         file_bytes:
@@ -102,13 +109,50 @@ class DocumentService:
             progress_cb(
                 f"  Parsed '{doc.name}': {doc.total_pages} page(s), type={doc.type.value}"
             )
+
+        # --- Text-based element extraction ---
         elements: list[AtomicElement] = self._extractor.extract_elements(
             doc, progress_cb=progress_cb
         )
         logger.info(
-            "Extracted %d elements from '%s'",
+            "Extracted %d text elements from '%s'",
             len(elements),
             doc.name,
+        )
+
+        # --- Image-based element extraction (PDF only) ---
+        if Path(filename).suffix.lower() == ".pdf" and isinstance(parser, PDFParser):
+            try:
+                image_contexts: list[ImageContext] = parser.extract_images(
+                    io.BytesIO(file_bytes), filename
+                )
+                if image_contexts:
+                    logger.info(
+                        "Found %d images in '%s' — running GPT-4o Vision analysis",
+                        len(image_contexts),
+                        filename,
+                    )
+                    image_elements = self._extractor.analyze_images(
+                        image_contexts, doc
+                    )
+                    elements.extend(image_elements)
+                    logger.info(
+                        "Vision extracted %d additional elements from images in '%s'",
+                        len(image_elements),
+                        doc.name,
+                    )
+            except Exception as exc:
+                # Image extraction is best-effort — don't fail the pipeline
+                logger.warning(
+                    "Image extraction failed for '%s' (continuing with text elements): %s",
+                    filename,
+                    exc,
+                )
+
+        logger.info(
+            "Total elements from '%s': %d (text + images)",
+            doc.name,
+            len(elements),
         )
         return doc, elements
 

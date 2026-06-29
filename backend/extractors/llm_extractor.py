@@ -1,18 +1,70 @@
+"""
+LLM-powered extraction of typed atomic elements and relationships.
+
+Implements :class:`core.interfaces.IExtractor` using OpenAI GPT-4o
+function calling for structured output.
+
+Changes from the original:
+- Token-based chunking via ``RecursiveCharacterTextSplitter.from_tiktoken_encoder``
+  replaces the character-based sentence splitter for consistent LLM context sizes.
+- Section-aware grouping and context prefix ``[Section | Page N]`` are preserved.
+- Deterministic UUID v5 IDs replace sequential counters for idempotent re-ingestion.
+- GPT-4o Vision analysis for extracted images (charts, tables, diagrams).
+"""
+
+import base64
+import hashlib
 import json
 import logging
 import re
+import uuid
 from typing import Callable
 
 from openai import OpenAI
 
 from config.settings import settings
-from core.models import ParsedDocument, AtomicElement, Relationship, ElementType, RelationshipType
+from core.models import (
+    AtomicElement,
+    ImageContext,
+    ParsedDocument,
+    Relationship,
+    ElementType,
+    RelationshipType,
+)
 from core.interfaces import IExtractor
 from core.exceptions import ExtractionError
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Token-based splitter (lazy import to avoid import-time overhead)
+# ---------------------------------------------------------------------------
 
+_SPLITTER = None
+
+
+def _get_token_splitter():
+    """
+    Lazy-load the tiktoken-based recursive text splitter.
+
+    Uses ``cl100k_base`` encoding (the encoding used by GPT-4o) with
+    1024-token chunks and 200-token overlap.
+    """
+    global _SPLITTER
+    if _SPLITTER is None:
+        from langchain_text_splitters import RecursiveCharacterTextSplitter
+
+        _SPLITTER = RecursiveCharacterTextSplitter.from_tiktoken_encoder(
+            encoding_name="cl100k_base",
+            chunk_size=1024,
+            chunk_overlap=200,
+        )
+    return _SPLITTER
+
+
+# ---------------------------------------------------------------------------
+# OpenAI tool schemas (unchanged)
+# ---------------------------------------------------------------------------
 ELEMENT_TOOL = {
     "type": "function",
     "function": {
@@ -82,6 +134,12 @@ RELATIONSHIP_TOOL = {
     },
 }
 
+# ---------------------------------------------------------------------------
+# UUID v5 namespace for deterministic element IDs
+# ---------------------------------------------------------------------------
+
+_GRAPHRAG_NS = uuid.UUID("a1b2c3d4-e5f6-7890-abcd-ef1234567890")
+
 
 class LLMExtractor(IExtractor):
     def __init__(self) -> None:
@@ -91,31 +149,9 @@ class LLMExtractor(IExtractor):
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _chunk_text(self, full_text: str) -> list[str]:
-        chunk_size = settings.max_chunk_chars
-        overlap = settings.chunk_overlap_chars
-        sentences = re.split(r"(?<=[.!?])\s+", full_text)
-        chunks: list[str] = []
-        current: list[str] = []
-        current_len: int = 0
-
-        for sent in sentences:
-            if current_len + len(sent) > chunk_size and current:
-                chunks.append(" ".join(current))
-                # keep overlap: pop sentences from front until under overlap
-                while current and current_len - len(current[0]) > overlap:
-                    current_len -= len(current.pop(0)) + 1
-            current.append(sent)
-            current_len += len(sent) + 1
-
-        if current:
-            chunks.append(" ".join(current))
-
-        return [c for c in chunks if len(c.strip()) > 50]
-
     _SECTION_RE = re.compile(
         r'(?:^|\n)(?:'
-        r'Section\s+\d+[\.\:]?\s+\w'           # Section 1. Letter
+        r'Section\s+\d+[\.:]?\s+\w'           # Section 1. Letter
         r'|(?:\d+\.){1,3}\s*\w'                # 3.1.2 Background
         r'|(?:APPENDIX|ANNEX)\s+[A-Z"\']+'     # APPENDIX A / ANNEX "B"
         r'|(?:GCC|SCC)\s+\d+\.\d+'             # GCC 6.1
@@ -138,30 +174,6 @@ class LLMExtractor(IExtractor):
                 return label[:80] if len(label) > 80 else label
         return None
 
-    def _split_text_into_chunks(
-        self, text: str
-    ) -> list[str]:
-        """Split *text* into overlapping sentence-boundary chunks."""
-        chunk_size = settings.max_chunk_chars
-        overlap = settings.chunk_overlap_chars
-        sentences = re.split(r"(?<=[.!?])\s+", text)
-        chunks: list[str] = []
-        current: list[str] = []
-        current_len: int = 0
-
-        for sent in sentences:
-            if current_len + len(sent) > chunk_size and current:
-                chunks.append(" ".join(current))
-                while current and current_len - len(current[0]) > overlap:
-                    current_len -= len(current.pop(0)) + 1
-            current.append(sent)
-            current_len += len(sent) + 1
-
-        if current:
-            chunks.append(" ".join(current))
-
-        return chunks
-
     def _chunk_pages(
         self, pages: list[str]
     ) -> list[tuple[str, str, int]]:
@@ -170,7 +182,9 @@ class LLMExtractor(IExtractor):
 
         Section headers are detected from the first 5 lines of each page.
         The last known section label is carried forward to pages with no header.
-        Chunks shorter than 80 chars of actual content are discarded.
+
+        Now uses token-based splitting via ``RecursiveCharacterTextSplitter``
+        with tiktoken's ``cl100k_base`` encoding for consistent LLM context.
         Every chunk is prefixed with ``[{section_label} | Page {start_page}]``
         so the LLM has structural context.
         """
@@ -192,10 +206,12 @@ class LLMExtractor(IExtractor):
                 label, start, accumulated = groups[-1]
                 groups[-1] = (label, start, accumulated + "\n\n" + page_text)
 
-        # Now split each group into sized chunks
+        # Now split each group into token-based chunks
+        splitter = _get_token_splitter()
         result: list[tuple[str, str, int]] = []
+
         for section_label, start_page, section_text in groups:
-            raw_chunks = self._split_text_into_chunks(section_text)
+            raw_chunks = splitter.split_text(section_text)
             for raw_chunk in raw_chunks:
                 # Filter out chunks with < 80 chars of actual content
                 if len(raw_chunk.strip()) < 80:
@@ -205,6 +221,35 @@ class LLMExtractor(IExtractor):
                 result.append((section_label, chunk_text, start_page))
 
         return result
+
+    @staticmethod
+    def _generate_element_id(
+        doc_hash: str,
+        section: str,
+        chunk_idx: int,
+        elem_type: str,
+        elem_idx: int,
+    ) -> str:
+        """
+        Generate a deterministic, human-readable element ID using UUID v5.
+
+        The UUID is derived from a composite key of the document hash,
+        section label, chunk index, element type, and element index.
+        The final ID uses a short prefix + truncated UUID for readability:
+        e.g. ``REQ_a3b4c5d6`` instead of ``REQ_001``.
+        """
+        raw = f"{doc_hash}_{section}_{chunk_idx}_{elem_type}_{elem_idx}"
+        uid = uuid.uuid5(_GRAPHRAG_NS, raw)
+        short = uid.hex[:8]  # 8 hex chars = 32 bits, 4B+ unique IDs
+        prefix_map = {
+            "Requirement": "REQ",
+            "Clause": "CL",
+            "Risk": "RISK",
+            "Mitigation": "MIT",
+            "LD": "LD",
+        }
+        pfx = prefix_map.get(elem_type, "ELM")
+        return f"{pfx}_{short}"
 
     def _type_str_to_enum(self, t: str) -> ElementType:
         mapping: dict[str, ElementType] = {
@@ -231,9 +276,15 @@ class LLMExtractor(IExtractor):
         doc: ParsedDocument,
         progress_cb: Callable[[str], None] | None = None,
     ) -> list[AtomicElement]:
+        # Compute a content hash for deterministic IDs
+        content_hash = hashlib.sha256(
+            "\n".join(doc.pages).encode("utf-8")
+        ).hexdigest()[:12]
+
         chunks = self._chunk_pages(doc.pages)
         raw_elements: list[dict] = []
-        chunk_meta: list[tuple[str, int]] = []
+        # chunk_meta maps a list index to (section_label, start_page, chunk_idx)
+        chunk_meta: list[tuple[str, int, int]] = []
         counters: dict[str, int] = {t: 0 for t in ["REQ", "CL", "RISK", "MIT", "LD"]}
         prefix_map: dict[str, str] = {
             "Requirement": "REQ",
@@ -243,18 +294,21 @@ class LLMExtractor(IExtractor):
             "LD": "LD",
         }
 
+        # Doc-slug prefix for human readability in Neo4j
+        raw_slug = re.sub(r"^DOC_", "", doc.id).upper()
+        doc_slug = re.sub(r"[^A-Z0-9]", "", raw_slug)[:4] or "DOC"
+
         if progress_cb:
             progress_cb(f"  {len(chunks)} section-chunk(s) to process via {settings.llm_model}")
 
-        for i, (section_label, chunk_text, start_page) in enumerate(chunks):
+        for chunk_idx, (section_label, chunk_text, start_page) in enumerate(chunks):
             if progress_cb:
                 progress_cb(
-                    f"  LLM [{i + 1}/{len(chunks)}] {section_label[:50]} (p.{start_page})"
+                    f"  LLM [{chunk_idx + 1}/{len(chunks)}] {section_label[:50]} (p.{start_page})"
                     f" — {len(chunk_text)} chars"
                 )
 
             source_hint = f"{doc.name} — {section_label}"
-            start_nums = {k: counters[k] + 1 for k in counters}
             system = (
                 f"You are a procurement document analyst. Extract atomic semantic elements.\n"
                 f"Document type: {doc.type.value} | Document: {doc.name}\n\n"
@@ -269,12 +323,11 @@ class LLMExtractor(IExtractor):
                 f"- LD: Liquidated Damages or financial penalty tied to non-performance.\n\n"
                 f"Extraction rules:\n"
                 f"- Extract EVERY distinct obligation, deadline, or deliverable as its own element.\n"
+                f"- For tables: each row with distinct data should be extracted as a separate element.\n"
                 f"- For scanned/OCR'd text: interpret imperfectly formatted lines (OCR artefacts) — "
                 f"focus on the semantic meaning, not the exact formatting.\n"
                 f"- Ignore pure table headers, form template labels, and blank-fill instructions.\n"
-                f"- ID format: REQ_{start_nums['REQ']:03d}…, "
-                f"CL_{start_nums['CL']:03d}…, RISK_{start_nums['RISK']:03d}…, "
-                f"MIT_{start_nums['MIT']:03d}…, LD_{start_nums['LD']:03d}…\n"
+                f"- ID format: use simple sequential IDs like REQ_001, CL_001 etc.\n"
                 f"- confidence: 0.9+ if explicitly stated, 0.7–0.9 if implied, skip below 0.7\n"
                 f'- Source: use "{source_hint}" verbatim as the source field'
             )
@@ -295,10 +348,10 @@ class LLMExtractor(IExtractor):
                 n_found = 0
                 if tc:
                     data = json.loads(tc[0].function.arguments)
-                    for e in data.get("elements", []):
+                    for elem_idx, e in enumerate(data.get("elements", [])):
                         if e.get("confidence", 0) >= settings.confidence_threshold:
                             raw_elements.append(e)
-                            chunk_meta.append((section_label, start_page))
+                            chunk_meta.append((section_label, start_page, chunk_idx))
                             pfx = prefix_map.get(e["type"], "REQ")
                             counters[pfx] += 1
                             n_found += 1
@@ -309,18 +362,18 @@ class LLMExtractor(IExtractor):
                         if usage else ""
                     )
                     progress_cb(
-                        f"  ✓ [{i + 1}/{len(chunks)}] {n_found} element(s) above threshold{tok_info}"
+                        f"  ✓ [{chunk_idx + 1}/{len(chunks)}] {n_found} element(s) above threshold{tok_info}"
                     )
             except Exception as ex:
                 if progress_cb:
-                    progress_cb(f"  ✗ [{i + 1}/{len(chunks)}] extraction failed: {ex}")
+                    progress_cb(f"  ✗ [{chunk_idx + 1}/{len(chunks)}] extraction failed: {ex}")
                 raise ExtractionError(
-                    f"Element extraction failed on chunk {i}: {ex}"
+                    f"Element extraction failed on chunk {chunk_idx}: {ex}"
                 ) from ex
 
         # Deduplicate: within same type, if word overlap > 70% keep higher confidence
         deduped: list[dict] = []
-        deduped_meta: list[tuple[str, int]] = []
+        deduped_meta: list[tuple[str, int, int]] = []
         for idx, elem in enumerate(raw_elements):
             words_e = set(elem["text"].lower().split())
             duplicate = False
@@ -344,20 +397,24 @@ class LLMExtractor(IExtractor):
                 f"  Dedup: {len(raw_elements)} raw → {len(deduped)} unique elements"
             )
 
-        # Prefix IDs with a short doc slug so elements from different documents
-        # never collide on MERGE in Neo4j (e.g. RFP_REQ_001 vs CON_REQ_001).
-        raw_slug = re.sub(r"^DOC_", "", doc.id).upper()
-        doc_slug = re.sub(r"[^A-Z0-9]", "", raw_slug)[:4] or "DOC"
-
+        # Build AtomicElement objects with deterministic UUID v5 IDs
+        # The IDs are prefixed with a doc slug for human readability:
+        # e.g. UTAH_REQ_a3b4c5d6
         type_counters: dict[str, int] = {}
         result: list[AtomicElement] = []
-        for e, (section_label, page_number) in zip(deduped, deduped_meta):
-            pfx = prefix_map.get(e["type"], "REQ")
-            type_counters[pfx] = type_counters.get(pfx, 0) + 1
-            elem_id = f"{doc_slug}_{pfx}_{type_counters[pfx]:03d}"
+        for e, (section_label, page_number, chunk_idx) in zip(deduped, deduped_meta):
+            elem_type = e["type"]
+            type_counters[elem_type] = type_counters.get(elem_type, 0) + 1
+            elem_idx = type_counters[elem_type]
+
+            deterministic_id = self._generate_element_id(
+                content_hash, section_label, chunk_idx, elem_type, elem_idx
+            )
+            elem_id = f"{doc_slug}_{deterministic_id}"
+
             atomic = AtomicElement(
                 id=elem_id,
-                type=self._type_str_to_enum(e["type"]),
+                type=self._type_str_to_enum(elem_type),
                 text=e["text"],
                 source=e.get("source", doc.name),
                 document_id=doc.id,
@@ -365,6 +422,9 @@ class LLMExtractor(IExtractor):
             )
             atomic.metadata["section"] = section_label
             atomic.metadata["page_number"] = page_number
+            atomic.metadata["content_hash"] = hashlib.sha256(
+                e["text"].encode("utf-8")
+            ).hexdigest()[:16]
             result.append(atomic)
         return result
 
@@ -491,3 +551,131 @@ class LLMExtractor(IExtractor):
             return rels
         except Exception as ex:
             raise ExtractionError(f"Relationship extraction failed: {ex}") from ex
+
+    # ------------------------------------------------------------------
+    # GPT-4o Vision — image analysis
+    # ------------------------------------------------------------------
+
+    def analyze_images(
+        self, images: list[ImageContext], doc: ParsedDocument
+    ) -> list[AtomicElement]:
+        """
+        Send extracted images to GPT-4o Vision for structured analysis.
+
+        Each image's OCR text and spatial context are sent along with the
+        base64-encoded image.  GPT-4o returns a structured summary which
+        is then converted into AtomicElement objects and fed into the
+        standard extraction pipeline.
+
+        Parameters
+        ----------
+        images:
+            List of :class:`ImageContext` objects from PDF image extraction.
+        doc:
+            The parent document (used for document_id and source).
+
+        Returns
+        -------
+        list[AtomicElement]
+            Elements extracted from the image analysis.
+        """
+        if not images:
+            return []
+
+        elements: list[AtomicElement] = []
+        raw_slug = re.sub(r"^DOC_", "", doc.id).upper()
+        doc_slug = re.sub(r"[^A-Z0-9]", "", raw_slug)[:4] or "DOC"
+
+        for img_idx, img_ctx in enumerate(images):
+            try:
+                # Encode image to base64
+                b64_image = base64.b64encode(img_ctx.image_bytes).decode("utf-8")
+
+                context_parts = []
+                if img_ctx.surrounding_text:
+                    context_parts.append(
+                        f"Surrounding document text:\n{img_ctx.surrounding_text}"
+                    )
+                if img_ctx.ocr_text:
+                    context_parts.append(
+                        f"OCR-extracted text from the image:\n{img_ctx.ocr_text}"
+                    )
+
+                context_str = "\n\n".join(context_parts) if context_parts else ""
+
+                system_prompt = (
+                    "You are a procurement document analyst examining an image from a "
+                    f"{doc.type.value} document named '{doc.name}'.\n\n"
+                    "Analyze the image and extract atomic procurement elements.\n"
+                    "For tables: extract each row with distinct obligations, SLAs, or requirements.\n"
+                    "For charts/diagrams: describe the key metrics and thresholds.\n\n"
+                    "Return your analysis using the extract_elements function.\n"
+                    "Element types: Requirement, Clause, Risk, Mitigation, LD.\n"
+                    "Use sequential IDs: REQ_001, CL_001, etc.\n"
+                    f'Source: "Image on Page {img_ctx.page_number} of {doc.name}"'
+                )
+
+                user_content = [
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/png;base64,{b64_image}",
+                            "detail": "high",
+                        },
+                    },
+                ]
+                if context_str:
+                    user_content.insert(0, {"type": "text", "text": context_str})
+
+                resp = self.client.chat.completions.create(
+                    model=settings.llm_model,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_content},
+                    ],
+                    tools=[ELEMENT_TOOL],
+                    tool_choice={"type": "function", "function": {"name": "extract_elements"}},
+                    max_tokens=settings.max_tokens_extraction,
+                )
+
+                tc = resp.choices[0].message.tool_calls
+                if not tc:
+                    continue
+
+                data = json.loads(tc[0].function.arguments)
+                for elem_idx, e in enumerate(data.get("elements", [])):
+                    if e.get("confidence", 0) < settings.confidence_threshold:
+                        continue
+
+                    # Deterministic ID from image hash + index
+                    det_id = self._generate_element_id(
+                        img_ctx.image_hash, "image", img_idx, e["type"], elem_idx
+                    )
+                    elem_id = f"{doc_slug}_{det_id}"
+
+                    atomic = AtomicElement(
+                        id=elem_id,
+                        type=self._type_str_to_enum(e["type"]),
+                        text=e["text"],
+                        source=e.get("source", f"Image on Page {img_ctx.page_number} of {doc.name}"),
+                        document_id=doc.id,
+                        confidence=float(e.get("confidence", 1.0)),
+                    )
+                    atomic.metadata["section"] = f"Image on Page {img_ctx.page_number}"
+                    atomic.metadata["page_number"] = img_ctx.page_number
+                    atomic.metadata["from_image"] = True
+                    atomic.metadata["image_hash"] = img_ctx.image_hash
+                    elements.append(atomic)
+
+            except Exception as exc:
+                logger.warning(
+                    "Vision analysis failed for image %d on page %d: %s",
+                    img_idx, img_ctx.page_number, exc,
+                )
+                continue
+
+        logger.info(
+            "GPT-4o Vision extracted %d elements from %d images",
+            len(elements), len(images),
+        )
+        return elements

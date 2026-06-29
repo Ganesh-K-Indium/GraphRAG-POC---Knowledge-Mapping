@@ -4,6 +4,10 @@ All settings are read from environment variables with sensible defaults.
 Uses python-dotenv to load from a .env file if present.
 """
 
+# SSL bypass MUST run before any HTTPS-capable library initialises.
+# The patch is defined once in core/ssl_patch.py and imported here.
+import core.ssl_patch  # noqa: F401
+
 import os
 from dataclasses import dataclass, field
 from pathlib import Path

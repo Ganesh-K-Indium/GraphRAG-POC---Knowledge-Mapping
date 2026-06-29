@@ -19,6 +19,19 @@
 
 ---
 
+## Recent Updates & Optimizations (Nishi)
+
+* **Neo4j Batch Ingestion**: Upgraded graph insertion to use batch `UNWIND` queries in `backend/graph/neo4j_store.py` and `backend/graph/builder.py`, resolving Mac CPU overheating issues during large document pipeline runs (Nishi).
+* **Deterministic Vector IDs**: Implemented MD5-hashed UUIDs for vectors in `backend/vector/qdrant_store.py` to prevent duplicate vectors upon container restarts (Nishi).
+* **Workspace Isolation Fix**: Fixed cross-workspace data leakage in `backend/services/qa_service.py` by ensuring `workspace_id` propagation (Nishi).
+* **DOCX Table Extraction**: Added logic to `backend/parsers/docx_parser.py` to parse XML nodes (`CT_P` and `CT_Tbl`) and convert Word tables into Markdown format, improving extraction quality (Nishi).
+* **Centralized SSL Patch**: Consolidated insecure SSL workarounds into a single `core/ssl_patch.py` module loaded at startup to clean up scattered bypass logic (Nishi).
+* **Disabled GraphitiMemory**: Temporarily disabled Graphiti inside `QAService` to prevent context bleeding across different workspaces (Nishi).
+* **Port Configuration Fix**: Corrected PostgreSQL port mapping in `.env` to align with Docker Compose bindings (Nishi).
+* **Conflict Resolution**: Cleanly merged real-time UI progress tracking with the backend optimization branch, resolving conflicts across `llm_extractor.py`, `pipeline.py`, and `document_service.py` (Nishi).
+
+---
+
 ## What This Does
 
 The platform lets analysts run multiple independent procurement analyses side-by-side — each in its own workspace with fully isolated graph data, vector indexes, and pipeline state.

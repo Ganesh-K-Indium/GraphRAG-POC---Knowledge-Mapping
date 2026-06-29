@@ -11,8 +11,11 @@ import logging
 from typing import Any
 
 from core.models import AtomicElement, CoverageResult, ParsedDocument, Relationship
-from graph import GraphBuilder, GraphitiMemory, GraphVisualizer, Neo4jGraphStore
+from graph import GraphBuilder, Neo4jGraphStore
 from vector import QdrantVectorStore
+
+# GraphitiMemory is disabled until workspace-isolation is implemented.
+# from graph.graphiti_memory import GraphitiMemory
 
 logger = logging.getLogger(__name__)
 
@@ -27,9 +30,11 @@ class GraphService:
         self.workspace_id = workspace_id
         self.store = store
         self.vector_store = vector_store
-        self.graphiti = GraphitiMemory()
+        # Graphiti is disabled — uncomment below to re-enable:
+        # self.graphiti = GraphitiMemory()
+        self.graphiti = None
         self.builder = GraphBuilder(store)
-        self.visualizer = GraphVisualizer(store)
+        # GraphVisualizer removed — React frontend handles visualisation.
 
     # ------------------------------------------------------------------
     # Graph construction

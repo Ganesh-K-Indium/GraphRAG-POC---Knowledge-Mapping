@@ -1,5 +1,15 @@
-"""FastAPI application entry point."""
+"""
+FastAPI application entry point for the GraphRAG Procurement API.
+
+Run with:
+    uvicorn api.main:app --reload --port 8000
+"""
 from __future__ import annotations
+
+# SSL bypass MUST be first — before any library that makes HTTPS connections.
+# Defined once in core/ssl_patch.py; importing it applies the patch.
+import core.ssl_patch  # noqa: F401
+
 
 import asyncio
 import logging

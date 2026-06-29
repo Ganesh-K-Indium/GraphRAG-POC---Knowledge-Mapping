@@ -57,6 +57,45 @@ class CoverageStatus(str, Enum):
 
 
 # ---------------------------------------------------------------------------
+# Image / media context (extracted from PDF pages)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ImageContext:
+    """
+    Represents an image extracted from a PDF page along with its OCR text
+    and spatial-proximity context.
+
+    This is a *parallel* data structure — it does not change the
+    :class:`ParsedDocument` interface.  Image contexts are passed alongside
+    parsed documents through the extraction pipeline.
+
+    Attributes
+    ----------
+    image_bytes:
+        Raw PNG bytes of the preprocessed (enhanced) image.
+    page_number:
+        1-indexed page number where the image was found.
+    ocr_text:
+        Text extracted from the image via Tesseract OCR.
+    surrounding_text:
+        Text blocks in spatial proximity to the image on the same page.
+    image_hash:
+        SHA-256 hex digest of the raw image bytes for deduplication.
+    source_filename:
+        Name of the PDF this image was extracted from.
+    """
+
+    image_bytes: bytes
+    page_number: int
+    ocr_text: str = ""
+    surrounding_text: str = ""
+    image_hash: str = ""
+    source_filename: str = ""
+
+
+# ---------------------------------------------------------------------------
 # Core graph elements
 # ---------------------------------------------------------------------------
 

@@ -8,6 +8,10 @@ python-docx>=1.1.0
 pytesseract>=0.3.10      # OCR fallback for scanned PDFs (requires Tesseract binary)
 Pillow>=10.0.0           # image rendering for OCR
 
+# ── Text splitting (token-aware chunking) ────────────────────────────────────
+langchain-text-splitters>=0.2.0
+tiktoken>=0.7.0
+
 # ── LLM — GPT-4o ────────────────────────────────────────────────────────────
 openai>=1.35.0
 
@@ -26,11 +30,18 @@ neo4j>=5.19.0
 graphiti-core>=0.3.0
 
 # ── Graph visualization ───────────────────────────────────────────────────────
-pyvis>=0.3.2
+# pyvis removed — the React frontend renders the graph via JSON API endpoints.
 networkx>=3.3
 
 # ── Utilities ────────────────────────────────────────────────────────────────
 python-dotenv>=1.0.0
 pandas>=2.2.0
 numpy>=1.26.0
+
+# ── API (FastAPI) ────────────────────────────────────────────────────────────
+fastapi>=0.110.0
+uvicorn>=0.28.0
+python-multipart>=0.0.9
+
+# ── Database ─────────────────────────────────────────────────────────────────
 psycopg2-binary>=2.9.0

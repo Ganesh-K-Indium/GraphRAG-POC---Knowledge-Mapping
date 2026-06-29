@@ -15,6 +15,8 @@ build/
 venv/
 env/
 ENV/
+poc/
+poc2/
 
 # Environment secrets — NEVER commit
 .env

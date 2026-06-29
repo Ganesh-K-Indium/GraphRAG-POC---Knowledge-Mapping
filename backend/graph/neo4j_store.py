@@ -114,6 +114,108 @@ class Neo4jGraphStore(IGraphStore):
                 f"{rel.target_id!r}: {exc}"
             ) from exc
 
+    # ------------------------------------------------------------------
+    # Batch write operations  (significantly faster than one-by-one)
+    # ------------------------------------------------------------------
+
+    def add_elements_batch(
+        self, elements: list[AtomicElement], workspace_id: str
+    ) -> None:
+        """Insert or update all *elements* in a single UNWIND transaction.
+
+        Opens one session, sends one query with a list parameter, and lets
+        Neo4j handle the looping server-side.  For 500 elements this reduces
+        ~500 round-trips to exactly one.
+
+        Parameters
+        ----------
+        elements:
+            Elements to insert or update (MERGE semantics).
+        workspace_id:
+            Workspace scope applied to every node.
+        """
+        if not elements:
+            return
+        batch = [
+            {
+                "id": e.id,
+                "type": e.type.value,
+                "text": e.text,
+                "source": e.source,
+                "document_id": e.document_id,
+                "confidence": e.confidence,
+                "metadata": str(e.metadata),
+                "section": e.metadata.get("section", ""),
+            }
+            for e in elements
+        ]
+        query = (
+            "UNWIND $batch AS props "
+            "MERGE (e:Element {id: props.id, workspace_id: $wid}) "
+            "SET e.type       = props.type, "
+            "    e.text       = props.text, "
+            "    e.source     = props.source, "
+            "    e.document_id = props.document_id, "
+            "    e.confidence = props.confidence, "
+            "    e.metadata   = props.metadata, "
+            "    e.section    = props.section"
+        )
+        try:
+            with self._driver.session(database=self._db) as s:
+                s.run(query, batch=batch, wid=workspace_id)
+        except Exception as exc:
+            raise GraphStoreError(
+                f"Batch element insert failed for workspace '{workspace_id}': {exc}"
+            ) from exc
+
+    def add_relationships_batch(
+        self, relationships: list[Relationship], workspace_id: str
+    ) -> None:
+        """Insert or update all *relationships* grouped by type, one query per type.
+
+        Neo4j requires the relationship type to be a static string in the Cypher
+        query — it cannot be a runtime parameter.  We therefore group rels by
+        type and emit one batched UNWIND query per distinct type, which is still
+        dramatically faster than one session-per-relationship.
+
+        Parameters
+        ----------
+        relationships:
+            Relationships to insert or update (MERGE semantics).
+        workspace_id:
+            Workspace scope for the MATCH of both endpoint nodes.
+        """
+        if not relationships:
+            return
+
+        # Group by relationship type to allow static type names in Cypher
+        from collections import defaultdict
+        by_type: dict[str, list[dict]] = defaultdict(list)
+        for rel in relationships:
+            by_type[rel.type.value].append({
+                "src": rel.source_id,
+                "tgt": rel.target_id,
+                "conf": rel.confidence,
+                "ev": rel.evidence,
+            })
+
+        try:
+            with self._driver.session(database=self._db) as s:
+                for rel_type_str, batch in by_type.items():
+                    query = (
+                        f"UNWIND $batch AS rel "
+                        f"MATCH (a:Element {{id: rel.src, workspace_id: $wid}}), "
+                        f"      (b:Element {{id: rel.tgt, workspace_id: $wid}}) "
+                        f"MERGE (a)-[r:{rel_type_str}]->(b) "
+                        f"SET r.confidence = rel.conf, r.evidence = rel.ev"
+                    )
+                    s.run(query, batch=batch, wid=workspace_id)
+        except Exception as exc:
+            raise GraphStoreError(
+                f"Batch relationship insert failed for workspace '{workspace_id}': {exc}"
+            ) from exc
+
+
     def clear_workspace(self, workspace_id: str) -> None:
         """Delete all elements (and their relationships) belonging to workspace_id."""
         try:

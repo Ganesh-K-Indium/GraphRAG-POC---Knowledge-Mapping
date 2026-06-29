@@ -43,7 +43,7 @@ class GraphBuilder:
         for doc in documents:
             self.store.clear_document(doc.id, workspace_id)
 
-        # Document pseudo-nodes
+        # ── Document pseudo-nodes (one per doc, written individually; small count) ──
         _hashes = doc_hashes or {}
         for doc in documents:
             with self.store._driver.session(database=self.store._db) as s:
@@ -60,20 +60,21 @@ class GraphBuilder:
                     did=doc.id, hash=_hashes.get(doc.id, ""),
                 )
 
-        for elem in elements:
-            self.store.add_element(elem, workspace_id)
+        # ── Batch insert all extracted elements in one round-trip ──
+        self.store.add_elements_batch(elements, workspace_id)
 
-        for elem in elements:
-            self.store.add_relationship(
-                Relationship(
-                    source_id=elem.document_id,
-                    target_id=elem.id,
-                    type=RelationshipType.CONTAINS,
-                    confidence=1.0,
-                    evidence="Document contains this element",
-                ),
-                workspace_id,
+        # ── Batch insert CONTAINS edges (Document → Element) in one round-trip ──
+        contains_rels = [
+            Relationship(
+                source_id=elem.document_id,
+                target_id=elem.id,
+                type=RelationshipType.CONTAINS,
+                confidence=1.0,
+                evidence="Document contains this element",
             )
+            for elem in elements
+        ]
+        self.store.add_relationships_batch(contains_rels, workspace_id)
 
         # Clear all semantic (non-CONTAINS) relationships before writing the fresh coordinator
         # batch. This prevents stale rels from previous incremental runs from accumulating —
@@ -81,8 +82,8 @@ class GraphBuilder:
         # silently persist and inflate coverage metrics.
         self.store.clear_non_contains_relationships(workspace_id)
 
-        for rel in relationships:
-            self.store.add_relationship(rel, workspace_id)
+        # ── Batch insert semantic relationships in one round-trip per type ──
+        self.store.add_relationships_batch(relationships, workspace_id)
 
         logger.info(
             "Graph build complete [%s]. Nodes: %d, Edges: %d",
@@ -90,6 +91,7 @@ class GraphBuilder:
             self.store.node_count(workspace_id),
             self.store.edge_count(workspace_id),
         )
+
 
     # ------------------------------------------------------------------
     # Coverage analysis

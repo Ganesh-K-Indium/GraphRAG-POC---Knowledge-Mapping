@@ -210,9 +210,11 @@ async def _stream_pipeline(
     new_hashes: dict = {}
 
     for qi, (fb, fn) in enumerate(to_process):
-        yield _sse({"type": "step_progress", "step": "extract",
-                    "message": f"[{qi + 1}/{len(to_process)}] Starting '{fn}'…",
-                    "current": qi, "total": len(to_process)})
+        yield _sse({
+            "type": "step_progress", "step": "extract",
+            "message": f"[{qi + 1}/{len(to_process)}] Processing '{fn}' (text + tables + images + LLM extraction)…",
+            "current": qi, "total": len(to_process),
+        })
         await asyncio.sleep(0)
 
         # Stream progress from sync thread in real-time using a queue +
