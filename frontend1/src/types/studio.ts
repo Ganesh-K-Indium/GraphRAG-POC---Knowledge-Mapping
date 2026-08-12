@@ -281,6 +281,11 @@ export interface SMESummary {
   pending: number
 }
 
+export interface StoreDocumentImportedEntry {
+  workspace_id: string
+  at: string
+}
+
 export interface StoreDocument {
   id: string
   source_project_id: string
@@ -291,7 +296,7 @@ export interface StoreDocument {
   industry?: string
   language?: string
   tag?: string
-  imported_into: string[]
+  imported_into: (string | StoreDocumentImportedEntry)[]
   published_at: string
 }
 

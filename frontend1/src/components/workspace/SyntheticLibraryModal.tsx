@@ -28,8 +28,15 @@ function LibraryRow({
   workspaceId: string
   workspaceName: string
 }) {
-  const status = useImportStatus(doc.id)
-  const alreadyImported = doc.imported_into.includes(workspaceId)
+  const status = useImportStatus(workspaceId, doc.id)
+  const alreadyImported = useMemo(() => {
+    if (!Array.isArray(doc.imported_into)) return false
+    return doc.imported_into.some((entry) =>
+      typeof entry === 'string'
+        ? entry === workspaceId
+        : entry?.workspace_id === workspaceId
+    )
+  }, [doc.imported_into, workspaceId])
 
   return (
     <div className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2.5 dark:border-border-dark">

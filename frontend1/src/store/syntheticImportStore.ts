@@ -17,10 +17,11 @@ export const useSyntheticImportStore = create<SyntheticImportState>((set, get) =
   jobs: {},
 
   startImport: (workspaceId, workspaceName, storeDocumentId, title) => {
-    if (get().jobs[storeDocumentId]?.status === 'importing') return
+    const jobKey = `${workspaceId}:${storeDocumentId}`
+    if (get().jobs[jobKey]?.status === 'importing') return
 
     set((state) => ({
-      jobs: { ...state.jobs, [storeDocumentId]: { storeDocumentId, workspaceId, status: 'importing' } },
+      jobs: { ...state.jobs, [jobKey]: { storeDocumentId, workspaceId, status: 'importing' } },
     }))
 
     // Runs through the exact same job-tracking path a manual upload does — it
@@ -35,11 +36,11 @@ export const useSyntheticImportStore = create<SyntheticImportState>((set, get) =
       stream: (onEvent, signal) => importSyntheticDocument(workspaceId, storeDocumentId, onEvent, signal),
     }).then((status) => {
       set((state) => ({
-        jobs: { ...state.jobs, [storeDocumentId]: { storeDocumentId, workspaceId, status } },
+        jobs: { ...state.jobs, [jobKey]: { storeDocumentId, workspaceId, status } },
       }))
     })
   },
 }))
 
-export const useImportStatus = (storeDocumentId: string) =>
-  useSyntheticImportStore((state) => state.jobs[storeDocumentId]?.status)
+export const useImportStatus = (workspaceId: string, storeDocumentId: string) =>
+  useSyntheticImportStore((state) => state.jobs[`${workspaceId}:${storeDocumentId}`]?.status)
