@@ -24,6 +24,8 @@ function makeId() {
 }
 
 export function ChatWindow({ workspaceId }: ChatWindowProps) {
+  // Disabled floating chat widget for demo video
+  return null
   const [open, setOpen] = useState(false)
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [input, setInput] = useState('')
